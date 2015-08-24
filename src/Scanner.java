@@ -777,36 +777,7 @@ public final class Scanner {
   private final Callback<Object, Object> nextRowErrback() {
     return new Callback<Object, Object>() {
       public Object call(final Object error) {
-        final RegionInfo old_region = region;  // Save before invalidate().
         invalidate();  // If there was an error, don't assume we're still OK.
-        if (error instanceof NotServingRegionException) {
-          // We'll resume scanning on another region, and we want to pick up
-          // right after the last key we successfully returned.  Padding the
-          // last key with an extra 0 gives us the next possible key.
-          // TODO(tsuna): If we get 2 NSRE in a row, well pad the key twice!
-          start_key = Arrays.copyOf(start_key, start_key.length + 1);
-          return nextRows();  // XXX dangerous endless retry
-        } else if (error instanceof UnknownScannerException) {
-          // This can happen when our scanner lease expires.  Unfortunately
-          // there's no way for us to distinguish between an expired lease
-          // and a real problem, for 2 reasons: the server doesn't keep track
-          // of recently expired scanners and the lease time is only known by
-          // the server and never communicated to the client.  The normal
-          // HBase client assumes that the client will share the same
-          // hbase-site.xml configuration so that both the client and the
-          // server will know the same lease time, but this assumption is bad
-          // as nothing guarantees that the client's configuration will be in
-          // sync with the server's.  This unnecessarily increases deployment
-          // complexity and it's brittle.
-          final Scanner scnr = Scanner.this;
-          LOG.warn(old_region + " pretends to not know " + scnr + ".  I will"
-            + " retry to open a scanner but this is typically because you've"
-            + " been holding the scanner open and idle for too long (possibly"
-            + " due to a long GC pause on your side or in the RegionServer)",
-            error);
-          // Let's re-open ourselves and keep scanning.
-          return nextRows();  // XXX dangerous endless retry
-        }
         return error;  // Let the error propagate.
       }
       public String toString() {
