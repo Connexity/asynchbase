@@ -26,15 +26,10 @@
  */
 package org.hbase.async;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.util.ArrayList;
-import java.util.Collection;
-
-import org.slf4j.Logger;
+import com.stumbleupon.async.Callback;
+import com.stumbleupon.async.Deferred;
+import com.stumbleupon.async.DeferredGroupException;
+import org.hbase.async.CompareFilter.CompareOp;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -45,47 +40,14 @@ import org.junit.runner.Result;
 import org.junit.runner.notification.Failure;
 import org.junit.runner.notification.RunListener;
 import org.powermock.reflect.Whitebox;
+import org.slf4j.Logger;
 
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
+import java.io.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Map;
 
-import com.stumbleupon.async.Callback;
-import com.stumbleupon.async.Deferred;
-import com.stumbleupon.async.DeferredGroupException;
-
-import org.hbase.async.AtomicIncrementRequest;
-import org.hbase.async.BinaryComparator;
-import org.hbase.async.BinaryPrefixComparator;
-import org.hbase.async.BitComparator;
-import org.hbase.async.Bytes;
-import org.hbase.async.ColumnPaginationFilter;
-import org.hbase.async.ColumnPrefixFilter;
-import org.hbase.async.ColumnRangeFilter;
-import org.hbase.async.CompareFilter.CompareOp;
-import org.hbase.async.DeleteRequest;
-import org.hbase.async.DependentColumnFilter;
-import org.hbase.async.FamilyFilter;
-import org.hbase.async.FilterList;
-import org.hbase.async.FirstKeyOnlyFilter;
-import org.hbase.async.FuzzyRowFilter;
-import org.hbase.async.GetRequest;
-import org.hbase.async.HBaseClient;
-import org.hbase.async.KeyRegexpFilter;
-import org.hbase.async.KeyValue;
-import org.hbase.async.NoSuchColumnFamilyException;
-import org.hbase.async.PutRequest;
-import org.hbase.async.QualifierFilter;
-import org.hbase.async.RegexStringComparator;
-import org.hbase.async.RowFilter;
-import org.hbase.async.ScanFilter;
-import org.hbase.async.Scanner;
-import org.hbase.async.SubstringComparator;
-import org.hbase.async.TableNotFoundException;
-import org.hbase.async.TimestampsFilter;
-import org.hbase.async.ValueFilter;
-import org.hbase.async.Common;
+import static org.junit.Assert.*;
 
 /**
  * Basic integration and regression tests for asynchbase.
@@ -121,6 +83,7 @@ final public class TestIntegration {
   private static String family;
   private static String[] args;
   private HBaseClient client;
+  private GetRequest[] gets;
 
   public static void main(final String[] args) throws Exception {
     preFlightTest(args);
@@ -745,6 +708,93 @@ final public class TestIntegration {
       client.bufferAtomicIncrement(new AtomicIncrementRequest(table, key,
                                                               family, qual,
                                                               value));
+  }
+
+  /** Lots of buffered multi-column counter increments from multiple threads. */
+  @Test
+  public void bufferedMultiColumnIncrementStressTest() throws Exception {
+    client.setFlushInterval(FAST_FLUSH);
+    final byte[] table = TestIntegration.table.getBytes();
+    final byte[] key1 = "cnt1".getBytes();  // Spread the increments..
+    final byte[] key2 = "cnt2".getBytes();  // .. over these two counters.
+    final byte[] family = TestIntegration.family.getBytes();
+    final byte[][] quals = { {'p'}, {'q'} };
+    final Collection<Deferred<Object>> dels =  new ArrayList<Deferred<Object>>();
+    dels.add(client.delete(new DeleteRequest(table, key1, family, quals[0])));
+    dels.add(client.delete(new DeleteRequest(table, key1, family, quals[1])));
+    dels.add(client.delete(new DeleteRequest(table, key2, family, quals[0])));
+    dels.add(client.delete(new DeleteRequest(table, key2, family, quals[1])));
+    Deferred.group(dels).join();
+
+    final int nthreads = Runtime.getRuntime().availableProcessors() * 2;
+    // The magic number comes from the limit on callbacks that Deferred
+    // imposes.  We spread increments over two counters, hence the x 2.
+    final int incr_per_thread = 8192 / nthreads * 2;
+    final boolean[] successes = new boolean[nthreads];
+
+    final class IncrementThread extends Thread {
+      private final int num;
+      public IncrementThread(final int num) {
+        super("IncrementThread-" + num);
+        this.num = num;
+      }
+      public void run() {
+        try {
+          doIncrements();
+          successes[num] = true;
+        } catch (Throwable e) {
+          successes[num] = false;
+          LOG.error("Uncaught exception", e);
+        }
+      }
+      private void doIncrements() {
+        for (int i = 0; i < incr_per_thread; i++) {
+          final byte[] key = i % 2 == 0 ? key1 : key2;
+          bufferMultiColumnIncrement(table, key, family, quals);
+        }
+      }
+    }
+
+    final IncrementThread[] threads = new IncrementThread[nthreads];
+    for (int i = 0; i < nthreads; i++) {
+      threads[i] = new IncrementThread(i);
+    }
+    LOG.info("Starting to generate multi-column increments");
+    for (int i = 0; i < nthreads; i++) {
+      threads[i].start();
+    }
+    for (int i = 0; i < nthreads; i++) {
+      threads[i].join();
+    }
+
+    LOG.info("Flushing all buffered multi-column increments.");
+    client.flush().joinUninterruptibly();
+    LOG.info("Done flushing all buffered multi-column increments.");
+
+    // Check that we the counters have the expected value.
+    final GetRequest[] gets = { mkGet(table, key1, family, quals[0]),
+        mkGet(table, key1, family, quals[1]),
+        mkGet(table, key2, family, quals[0]),
+        mkGet(table, key2, family, quals[1]) };
+    for (final GetRequest get : gets) {
+      final ArrayList<KeyValue> kvs = client.get(get).join();
+      assertSizeIs(1, kvs);
+      assertEquals(incr_per_thread * nthreads / 2,
+                   Bytes.getLong(kvs.get(0).value()));
+    }
+
+    for (int i = 0; i < nthreads; i++) {
+      assertEquals(true, successes[i]);  // Make sure no exception escaped.
+    }
+  }
+
+  /** Helper method to create an atomic increment request.  */
+  private Deferred<Map<byte[], Long>> bufferMultiColumnIncrement(final byte[] table,
+                                                                 final byte[] key, final byte[] family,
+                                                                 final byte[][] quals) {
+    return
+      client.bufferMultiColumnAtomicIncrement(new MultiColumnAtomicIncrementRequest(table, key,
+          family, quals));
   }
 
   /** Helper method to create a get request.  */

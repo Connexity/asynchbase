@@ -548,7 +548,7 @@ public final class HBaseClient {
    * "asynchbase.zk.quorum" specified in the format {@code "host1,host2,host3"}
    * and an executor thread pool.
    * @param config A configuration object
-   * @param The executor from which to obtain threads for NIO
+   * @param executor The executor from which to obtain threads for NIO
    * operations.  It is <strong>strongly</strong> encouraged to use a
    * {@link Executors#newCachedThreadPool} or something equivalent unless
    * you're sure to understand how Netty creates and uses threads.
@@ -769,8 +769,17 @@ public final class HBaseClient {
       if (buf != null && !buf.asMap().isEmpty()) {
         flushBufferedIncrements(buf);
         need_sync = true;
+
       } else {
-        need_sync = false;
+        final LoadingCache<BufferedMultiColumnIncrement, BufferedMultiColumnIncrement.Amounts> multiColumnBuf =
+          multi_column_increment_buffer;  // Single volatile-read.
+        if (multiColumnBuf != null && !multiColumnBuf.asMap().isEmpty()) {
+          flushBufferedMultiColumnIncrements(multiColumnBuf);
+          need_sync = true;
+
+        } else {
+          need_sync = false;
+        }
       }
     }
     final ArrayList<Deferred<Object>> d =
@@ -1281,7 +1290,6 @@ public final class HBaseClient {
   /**
    * Package-private access point for {@link Scanner}s to scan more rows.
    * @param scanner The scanner to use.
-   * @param nrows The maximum number of rows to retrieve.
    * @return A deferred row.
    */
   Deferred<Object> scanNextRows(final Scanner scanner) {
@@ -1424,7 +1432,7 @@ public final class HBaseClient {
    * <p>
    * If client-side buffering is disabled ({@link #getFlushInterval} returns
    * 0) then this function has the same effect as calling
-   * {@link #atomicIncrement(MultiColumnAtomicIncrementRequest)} directly.
+   * {@link #atomicIncrements(MultiColumnAtomicIncrementRequest)} directly.
    * @param request The increment request.
    * @return The deferred {@code long} value that results from the increment.
    * @since 1.3
@@ -1598,10 +1606,10 @@ public final class HBaseClient {
 
   /**
    * Flushes all buffered increments.
-   * @param increment_buffer The buffer to flush.
+   * @param multicolumn_increment_buffer The buffer to flush.
    */
   private static void flushBufferedMultiColumnIncrements(// JAVA Y U NO HAVE TYPEDEF? F U!
-    final LoadingCache<BufferedMultiColumnIncrement, BufferedMultiColumnIncrement.Amounts> increment_buffer) {
+    final LoadingCache<BufferedMultiColumnIncrement, BufferedMultiColumnIncrement.Amounts> multicolumn_increment_buffer) {
     // Calling this method to clean up before shutting down works solely
     // because `invalidateAll()' will *synchronously* remove everything.
     // The Guava documentation says "Discards all entries in the cache,
@@ -1626,10 +1634,10 @@ public final class HBaseClient {
     // to shutdown the rest of the client to let it complete all outstanding
     // operations.
     if (LOG.isDebugEnabled()) {
-      LOG.debug("Flushing " + increment_buffer.size() + " buffered increments");
+      LOG.debug("Flushing " + multicolumn_increment_buffer.size() + " buffered multi-column increments");
     }
-    synchronized (increment_buffer) {
-      increment_buffer.invalidateAll();
+    synchronized (multicolumn_increment_buffer) {
+      multicolumn_increment_buffer.invalidateAll();
     }
   }
 
@@ -1978,7 +1986,7 @@ public final class HBaseClient {
    * region server connections where applicable.
    * @param return_locations Whether or not to return the region information
    * in the deferred result.
-   * @return A deferred to wait on for completion. If {@link return_locations}
+   * @return A deferred to wait on for completion. If it
    * is true, the results will be a list of {@link RegionLocation} objects.
    * If false, the result will be null on a successful scan.
    */
