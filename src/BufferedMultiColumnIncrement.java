@@ -34,8 +34,8 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Package-private class to uniquely identify a buffered atomic increment.
- * @since 1.3
+ * Package-private class to uniquely identify a buffered multi-column atomic increment.
+ * @since 1.7.1
  */
 final class BufferedMultiColumnIncrement {
 
@@ -126,7 +126,7 @@ final class BufferedMultiColumnIncrement {
   }
 
   /**
-   * Atomic increment amount.
+   * Atomic increment amounts.
    * <p>
    * This behaves like a signed 49 bit atomic integer that
    * can only be incremented/decremented a specific number
@@ -264,7 +264,7 @@ final class BufferedMultiColumnIncrement {
       long[] currents = new long[values.length];
       StringBuilder sb = new StringBuilder();
 
-      sb.append("Amount: ");
+      sb.append("Amounts: ");
       for(int i = 0; i < values.length; i++) {
         currents[i] = values[i].get();
         sb.append(amount(currents[i]));
@@ -342,6 +342,7 @@ final class BufferedMultiColumnIncrement {
     public void onRemoval(final RemovalNotification<BufferedMultiColumnIncrement, Amounts> entry) {
 
       final Amounts amounts = entry.getValue();
+      assert(amounts != null);
 
       final long[] raw = amounts.getRawAndInvalidate();
       final long[] delta = new long[raw.length];

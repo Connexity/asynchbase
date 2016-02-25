@@ -26,6 +26,7 @@
  */
 package org.hbase.async;
 
+import com.google.common.base.Joiner;
 import com.google.common.collect.Maps;
 import org.hbase.async.generated.ClientPB.MutateRequest;
 import org.hbase.async.generated.ClientPB.MutateResponse;
@@ -47,7 +48,7 @@ import java.util.Map;
  */
 public final class MultiColumnAtomicIncrementRequest extends HBaseRpc
   implements HBaseRpc.HasTable, HBaseRpc.HasKey,
-             HBaseRpc.HasFamily, HBaseRpc.HasQualifier, HBaseRpc.IsEdit {
+             HBaseRpc.HasFamily, HBaseRpc.HasQualifiers, HBaseRpc.IsEdit {
 
   private static byte[][] toByteArrays(String[] strArray) {
     byte[][] converted = new byte[strArray.length][];
@@ -63,6 +64,8 @@ public final class MultiColumnAtomicIncrementRequest extends HBaseRpc
     'V', 'a', 'l', 'u', 'e'
   };
 
+  private static final Joiner AMOUNT_JOINER = Joiner.on(",");
+
   private final byte[] family;
   private final byte[][] qualifiers;
   private long[] amounts;
@@ -74,8 +77,8 @@ public final class MultiColumnAtomicIncrementRequest extends HBaseRpc
    * @param table The non-empty name of the table to use.
    * @param key The row key of the value to increment.
    * @param family The column family of the value to increment.
-   * @param qualifier The column qualifier of the value to increment.
-   * @param amount Amount by which to increment the value in HBase.
+   * @param qualifiers The column qualifier of the value to increment.
+   * @param amounts Amount by which to increment the value in HBase.
    * If negative, the value in HBase will be decremented.
    */
   public MultiColumnAtomicIncrementRequest(final byte[] table,
@@ -85,15 +88,25 @@ public final class MultiColumnAtomicIncrementRequest extends HBaseRpc
                                            final long[] amounts) {
     super(table, key);
     KeyValue.checkFamily(family);
+    this.family = family;
+
+    if (qualifiers == null || qualifiers.length == 0) {
+      throw new IllegalArgumentException("qualifiers must be provided for MultiColumnAtomicIncrementRequest");
+    }
     for (byte[] qualifier : qualifiers) {
       KeyValue.checkQualifier(qualifier);
     }
-    this.family = family;
-
-    assert(qualifiers.length == amounts.length);
     this.qualifiers = qualifiers;
+
     if (amounts != null) {
+      if (amounts.length == 0) {
+        throw new IllegalArgumentException("amounts must be provided for MultiColumnAtomicIncrementRequest");
+      }
+      if (qualifiers.length != amounts.length) {
+        throw new IllegalArgumentException("Number of amounts must be equal to the number of qualifiers provided for MultiColumnAtomicIncrementRequest");
+      }
       this.amounts = amounts;
+
     } else {
       this.amounts = new long[qualifiers.length];
       Arrays.fill(this.amounts, 1L);
@@ -102,14 +115,14 @@ public final class MultiColumnAtomicIncrementRequest extends HBaseRpc
 
   /**
    * Constructor.  This is equivalent to:
-   * {@link #AtomicIncrementRequest(byte[], byte[], byte[], byte[], long)
-   * AtomicIncrementRequest}{@code (table, key, family, qualifier, 1)}
+   * {@link #MultiColumnAtomicIncrementRequest(byte[], byte[], byte[], byte[][], long[])
+   * MultiColumnAtomicIncrementRequest}{@code (table, key, family, qualifiers, new long[] {1, ..})}
    * <p>
    * <strong>These byte arrays will NOT be copied.</strong>
    * @param table The non-empty name of the table to use.
    * @param key The row key of the value to increment.
    * @param family The column family of the value to increment.
-   * @param qualifier The column qualifier of the value to increment.
+   * @param qualifiers The column qualifier of the value to increment.
    */
   public MultiColumnAtomicIncrementRequest(final byte[] table,
                                            final byte[] key,
@@ -124,8 +137,8 @@ public final class MultiColumnAtomicIncrementRequest extends HBaseRpc
    * @param table The non-empty name of the table to use.
    * @param key The row key of the value to increment.
    * @param family The column family of the value to increment.
-   * @param qualifier The column qualifier of the value to increment.
-   * @param amount Amount by which to increment the value in HBase.
+   * @param qualifiers The column qualifier of the value to increment.
+   * @param amounts Amount by which to increment the value in HBase.
    * If negative, the value in HBase will be decremented.
    */
   public MultiColumnAtomicIncrementRequest(final String table,
@@ -140,12 +153,12 @@ public final class MultiColumnAtomicIncrementRequest extends HBaseRpc
   /**
    * Constructor.  This is equivalent to:
    * All strings are assumed to use the platform's default charset.
-   * {@link #AtomicIncrementRequest(String, String, String, String, long)
-   * AtomicIncrementRequest}{@code (table, key, family, qualifier, 1)}
+   * {@link #MultiColumnAtomicIncrementRequest(String, String, String, String[], long[])
+   * MultiColumnAtomicIncrementRequest}{@code (table, key, family, qualifiers, new long[]{ 1, ..})}
    * @param table The non-empty name of the table to use.
    * @param key The row key of the value to increment.
    * @param family The column family of the value to increment.
-   * @param qualifier The column qualifier of the value to increment.
+   * @param qualifiers The column qualifier of the value to increment.
    */
   public MultiColumnAtomicIncrementRequest(final String table,
                                            final String key,
@@ -193,19 +206,13 @@ public final class MultiColumnAtomicIncrementRequest extends HBaseRpc
   }
 
   @Override
-  public byte[] qualifier() {
-    throw new UnsupportedOperationException("qualifier() is not supported by " + this.getClass().getName());
-  }
-
   public byte[][] qualifiers() {
     return qualifiers;
   }
 
   public String toString() {
-    return super.toStringWithQualifier("AtomicIncrementRequest",
-                                       family,
-                                       new byte[] { 'N', 'A' },
-                                       ", qualifies=" + qualifiers + ", amount=" + amounts);
+    return super.toStringWithQualifiers("MultiColumnAtomicIncrementRequest",
+        family, qualifiers, null, ", amounts=" + AMOUNT_JOINER.join(Arrays.asList(amounts)));
   }
 
   // ---------------------- //
