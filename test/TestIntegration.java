@@ -582,134 +582,6 @@ final public class TestIntegration {
     }
   }
 
-  /** Increment coalescing with values too large to be coalesced. */
-  @Test
-  public void incrementCoalescingWithAmountsTooBig() throws Exception {
-    client.setFlushInterval(SLOW_FLUSH);
-    final byte[] table = TestIntegration.table.getBytes();
-    final byte[] key = "cnt".getBytes();
-    final byte[] family = TestIntegration.family.getBytes();
-    final byte[] qual = { 'q' };
-    final DeleteRequest del = new DeleteRequest(table, key, family, qual);
-    del.setBufferable(false);
-    client.delete(del).join();
-    final long big = 1L << 48;  // Too big to be coalesced.
-    final ArrayList<KeyValue> kvs = Deferred.group(
-      bufferIncrement(table, key, family, qual, big),
-      bufferIncrement(table, key, family, qual, big)
-    ).addCallbackDeferring(new Callback<Deferred<ArrayList<KeyValue>>,
-                                        ArrayList<Long>>() {
-      public Deferred<ArrayList<KeyValue>> call(final ArrayList<Long> incs) {
-        final GetRequest get = new GetRequest(table, key)
-          .family(family).qualifier(qual);
-        return client.get(get);
-      }
-    }).join();
-    assertSizeIs(1, kvs);
-    assertEquals(big + big, Bytes.getLong(kvs.get(0).value()));
-    // Check we sent the right number of RPCs.
-    assertEquals(2, client.stats().atomicIncrements());
-  }
-
-  /** Increment coalescing with large values that overflow. */
-  @Test
-  public void incrementCoalescingWithOverflowingAmounts() throws Exception {
-    client.setFlushInterval(SLOW_FLUSH);
-    final byte[] table = TestIntegration.table.getBytes();
-    final byte[] key = "cnt".getBytes();
-    final byte[] family = TestIntegration.family.getBytes();
-    final byte[] qual = { 'q' };
-    final DeleteRequest del = new DeleteRequest(table, key, family, qual);
-    del.setBufferable(false);
-    client.delete(del).join();
-    final long big = 1L << 47;
-    // First two RPCs can be coalesced.
-    bufferIncrement(table, key, family, qual, big);
-    bufferIncrement(table, key, family, qual, 1);
-    // This one would cause an overflow, so will be sent as a separate RPC.
-    // Overflow would happen because the max value is (1L << 48) - 1.
-    bufferIncrement(table, key, family, qual, big);
-    client.flush().joinUninterruptibly();
-    final GetRequest get = new GetRequest(table, key)
-      .family(family).qualifier(qual);
-    final ArrayList<KeyValue> kvs = client.get(get).join();
-    assertSizeIs(1, kvs);
-    assertEquals(big + 1 + big, Bytes.getLong(kvs.get(0).value()));
-    // Check we sent the right number of RPCs.
-    assertEquals(2, client.stats().atomicIncrements());
-  }
-
-  /** Increment coalescing with negative values and underflows. */
-  @Test
-  public void incrementCoalescingWithUnderflowingAmounts() throws Exception {
-    client.setFlushInterval(SLOW_FLUSH);
-    final byte[] table = TestIntegration.table.getBytes();
-    final byte[] key = "cnt".getBytes();
-    final byte[] family = TestIntegration.family.getBytes();
-    final byte[] qual = { 'q' };
-    final DeleteRequest del = new DeleteRequest(table, key, family, qual);
-    del.setBufferable(false);
-    client.delete(del).join();
-    final long big = -1L << 47;
-    // First two RPCs can be coalesced.
-    bufferIncrement(table, key, family, qual, big);
-    bufferIncrement(table, key, family, qual, -1);
-    // This one would cause an underflow, so will be sent as a separate RPC.
-    // Overflow would happen because the max value is -1L << 48.
-    bufferIncrement(table, key, family, qual, big);
-    client.flush().joinUninterruptibly();
-    final GetRequest get = new GetRequest(table, key)
-      .family(family).qualifier(qual);
-    final ArrayList<KeyValue> kvs = client.get(get).join();
-    assertSizeIs(1, kvs);
-    assertEquals(big - 1 + big, Bytes.getLong(kvs.get(0).value()));
-    // Check we sent the right number of RPCs.
-    assertEquals(2, client.stats().atomicIncrements());
-  }
-
-  /** Increment coalescing where the coalesced sum ends up being zero. */
-  @Test
-  public void incrementCoalescingWithZeroSumAmount() throws Exception {
-    client.setFlushInterval(SLOW_FLUSH);
-    final byte[] table = TestIntegration.table.getBytes();
-    final byte[] key = "cnt".getBytes();
-    final byte[] family = TestIntegration.family.getBytes();
-    final byte[] qual = { 'q' };
-    final DeleteRequest del = new DeleteRequest(table, key, family, qual);
-    del.setBufferable(false);
-    client.delete(del).join();
-    // HBase 0.98 and up do not create a KV on atomic increment when the
-    // increment amount is 0.  So let's first send an increment of some
-    // arbitrary value, and then ensure that this value hasn't changed.
-    long n = client.atomicIncrement(new AtomicIncrementRequest(table, key,
-                                                               family, qual,
-                                                               42)).join();
-    assertEquals(42, n);
-    bufferIncrement(table, key, family, qual, 1);
-    bufferIncrement(table, key, family, qual, 2);
-    bufferIncrement(table, key, family, qual, -3);
-    client.flush().joinUninterruptibly();
-    final GetRequest get = new GetRequest(table, key)
-      .family(family).qualifier(qual);
-    final ArrayList<KeyValue> kvs = client.get(get).join();
-    assertSizeIs(1, kvs);
-    assertEquals(42, Bytes.getLong(kvs.get(0).value()));
-    // The sum was 0, but must have sent the increment anyway.
-    // So in total we should have sent two increments, the initial one,
-    // that sets the value to 42, and the one incrementing by zero.
-    assertEquals(2, client.stats().atomicIncrements());
-  }
-
-  /** Helper method to create an atomic increment request.  */
-  private Deferred<Long> bufferIncrement(final byte[] table,
-                                         final byte[] key, final byte[] family,
-                                         final byte[] qual, final long value) {
-    return
-      client.bufferAtomicIncrement(new AtomicIncrementRequest(table, key,
-                                                              family, qual,
-                                                              value));
-  }
-
   /** Lots of buffered multi-column counter increments from multiple threads. */
   @Test
   public void bufferedMultiColumnIncrementStressTest() throws Exception {
@@ -788,13 +660,288 @@ final public class TestIntegration {
     }
   }
 
+  /** Increment coalescing with values too large to be coalesced. */
+  @Test
+  public void incrementCoalescingWithAmountsTooBig() throws Exception {
+    client.setFlushInterval(SLOW_FLUSH);
+    final byte[] table = TestIntegration.table.getBytes();
+    final byte[] key = "cnt".getBytes();
+    final byte[] family = TestIntegration.family.getBytes();
+    final byte[] qual = { 'q' };
+    final DeleteRequest del = new DeleteRequest(table, key, family, qual);
+    del.setBufferable(false);
+    client.delete(del).join();
+    final long big = 1L << 48;  // Too big to be coalesced.
+    final ArrayList<KeyValue> kvs = Deferred.group(
+      bufferIncrement(table, key, family, qual, big),
+      bufferIncrement(table, key, family, qual, big)
+    ).addCallbackDeferring(new Callback<Deferred<ArrayList<KeyValue>>,
+                                        ArrayList<Long>>() {
+      public Deferred<ArrayList<KeyValue>> call(final ArrayList<Long> incs) {
+        final GetRequest get = new GetRequest(table, key)
+          .family(family).qualifier(qual);
+        return client.get(get);
+      }
+    }).join();
+    assertSizeIs(1, kvs);
+    assertEquals(big + big, Bytes.getLong(kvs.get(0).value()));
+    // Check we sent the right number of RPCs.
+    assertEquals(2, client.stats().atomicIncrements());
+  }
+
+  /** Multi-column increment coalescing with values too large to be coalesced. */
+  @Test
+  public void multiColumnIncrementCoalescingWithAmountsTooBig() throws Exception {
+    client.setFlushInterval(SLOW_FLUSH);
+    final byte[] table = TestIntegration.table.getBytes();
+    final byte[] key = "cnt".getBytes();
+    final byte[] family = TestIntegration.family.getBytes();
+    final byte[][] quals = { {'p'}, {'q'} };
+
+    final Collection<Deferred<Object>> dels =  new ArrayList<Deferred<Object>>();
+    dels.add(client.delete(new DeleteRequest(table, key, family, quals[0])));
+    dels.add(client.delete(new DeleteRequest(table, key, family, quals[1])));
+    Deferred.group(dels).join();
+
+    final long big = 1L << 48;  // Too big to be coalesced.
+    final ArrayList<KeyValue> kvs = Deferred.group(
+            bufferMultiColumnIncrement(table, key, family, quals, new long[] { big, big }),
+            bufferMultiColumnIncrement(table, key, family, quals, new long[] { big, big })
+    ).addCallbackDeferring(new Callback<Deferred<ArrayList<KeyValue>>,
+            ArrayList<Map<byte[], Long>>>() {
+
+      public Deferred<ArrayList<KeyValue>> call(final ArrayList<Map<byte[], Long>> incs) {
+        final GetRequest get = new GetRequest(table, key)
+                .family(family).qualifiers(quals);
+        return client.get(get);
+      }
+    }).join();
+    assertSizeIs(2, kvs);
+    assertEquals(big + big, Bytes.getLong(kvs.get(0).value()));
+    assertEquals(big + big, Bytes.getLong(kvs.get(1).value()));
+
+    // Check we sent the right number of RPCs.
+    assertEquals(2, client.stats().atomicIncrements());
+  }
+
+  /** Increment coalescing with large values that overflow. */
+  @Test
+  public void incrementCoalescingWithOverflowingAmounts() throws Exception {
+    client.setFlushInterval(SLOW_FLUSH);
+    final byte[] table = TestIntegration.table.getBytes();
+    final byte[] key = "cnt".getBytes();
+    final byte[] family = TestIntegration.family.getBytes();
+    final byte[] qual = { 'q' };
+    final DeleteRequest del = new DeleteRequest(table, key, family, qual);
+    del.setBufferable(false);
+    client.delete(del).join();
+    final long big = 1L << 47;
+    // First two RPCs can be coalesced.
+    bufferIncrement(table, key, family, qual, big);
+    bufferIncrement(table, key, family, qual, 1);
+    // This one would cause an overflow, so will be sent as a separate RPC.
+    // Overflow would happen because the max value is (1L << 48) - 1.
+    bufferIncrement(table, key, family, qual, big);
+    client.flush().joinUninterruptibly();
+    final GetRequest get = new GetRequest(table, key)
+      .family(family).qualifier(qual);
+    final ArrayList<KeyValue> kvs = client.get(get).join();
+    assertSizeIs(1, kvs);
+    assertEquals(big + 1 + big, Bytes.getLong(kvs.get(0).value()));
+    // Check we sent the right number of RPCs.
+    assertEquals(2, client.stats().atomicIncrements());
+  }
+
+  /** Multi-column increment coalescing with large values that overflow. */
+  @Test
+  public void multiColumnIncrementCoalescingWithOverflowingAmounts() throws Exception {
+    client.setFlushInterval(SLOW_FLUSH);
+    final byte[] table = TestIntegration.table.getBytes();
+    final byte[] key = "cnt".getBytes();
+    final byte[] family = TestIntegration.family.getBytes();
+    final byte[][] quals = { {'p'}, {'q'} };
+
+    final Collection<Deferred<Object>> dels =  new ArrayList<Deferred<Object>>();
+    dels.add(client.delete(new DeleteRequest(table, key, family, quals[0])));
+    dels.add(client.delete(new DeleteRequest(table, key, family, quals[1])));
+    Deferred.group(dels).join();
+
+    final long big = 1L << 47;
+    // First two RPCs can be coalesced.
+    bufferMultiColumnIncrement(table, key, family, quals, new long[] { big, big });
+    bufferMultiColumnIncrement(table, key, family, quals, new long[] { 1, 1 });
+    // This one would cause an overflow, so will be sent as a separate RPC.
+    // Overflow would happen because the max value is (1L << 48) - 1.
+    bufferMultiColumnIncrement(table, key, family, quals, new long[] { big, big });
+    client.flush().joinUninterruptibly();
+    final GetRequest get = new GetRequest(table, key)
+      .family(family).qualifiers(quals);
+    final ArrayList<KeyValue> kvs = client.get(get).join();
+    assertSizeIs(2, kvs);
+    assertEquals(big + 1 + big, Bytes.getLong(kvs.get(0).value()));
+    assertEquals(big + 1 + big, Bytes.getLong(kvs.get(1).value()));
+    // Check we sent the right number of RPCs.
+    assertEquals(2, client.stats().atomicIncrements());
+  }
+
+  /** Increment coalescing with negative values and underflows. */
+  @Test
+  public void incrementCoalescingWithUnderflowingAmounts() throws Exception {
+    client.setFlushInterval(SLOW_FLUSH);
+    final byte[] table = TestIntegration.table.getBytes();
+    final byte[] key = "cnt".getBytes();
+    final byte[] family = TestIntegration.family.getBytes();
+    final byte[] qual = { 'q' };
+    final DeleteRequest del = new DeleteRequest(table, key, family, qual);
+    del.setBufferable(false);
+    client.delete(del).join();
+    final long big = -1L << 47;
+    // First two RPCs can be coalesced.
+    bufferIncrement(table, key, family, qual, big);
+    bufferIncrement(table, key, family, qual, -1);
+    // This one would cause an underflow, so will be sent as a separate RPC.
+    // Overflow would happen because the max value is -1L << 48.
+    bufferIncrement(table, key, family, qual, big);
+    client.flush().joinUninterruptibly();
+    final GetRequest get = new GetRequest(table, key)
+      .family(family).qualifier(qual);
+    final ArrayList<KeyValue> kvs = client.get(get).join();
+    assertSizeIs(1, kvs);
+    assertEquals(big - 1 + big, Bytes.getLong(kvs.get(0).value()));
+    // Check we sent the right number of RPCs.
+    assertEquals(2, client.stats().atomicIncrements());
+  }
+
+  /** Multi-column increment coalescing with negative values and underflows. */
+  @Test
+  public void multiColumnIncrementCoalescingWithUnderflowingAmounts() throws Exception {
+    client.setFlushInterval(SLOW_FLUSH);
+    final byte[] table = TestIntegration.table.getBytes();
+    final byte[] key = "cnt".getBytes();
+    final byte[] family = TestIntegration.family.getBytes();
+    final byte[][] quals = { {'p'}, {'q'} };
+
+    final Collection<Deferred<Object>> dels =  new ArrayList<Deferred<Object>>();
+    dels.add(client.delete(new DeleteRequest(table, key, family, quals[0])));
+    dels.add(client.delete(new DeleteRequest(table, key, family, quals[1])));
+    Deferred.group(dels).join();
+
+    final long big = -1L << 47;
+    // First two RPCs can be coalesced.
+    bufferMultiColumnIncrement(table, key, family, quals, new long[] { big, big });
+    bufferMultiColumnIncrement(table, key, family, quals, new long[] { -1, -1 });
+    // This one would cause an underflow, so will be sent as a separate RPC.
+    // Overflow would happen because the max value is -1L << 48.
+    bufferMultiColumnIncrement(table, key, family, quals, new long[] { big, big });
+    client.flush().joinUninterruptibly();
+    final GetRequest get = new GetRequest(table, key)
+      .family(family).qualifiers(quals);
+    final ArrayList<KeyValue> kvs = client.get(get).join();
+    assertSizeIs(2, kvs);
+    assertEquals(big - 1 + big, Bytes.getLong(kvs.get(0).value()));
+    assertEquals(big - 1 + big, Bytes.getLong(kvs.get(1).value()));
+    // Check we sent the right number of RPCs.
+    assertEquals(2, client.stats().atomicIncrements());
+  }
+
+  /** Increment coalescing where the coalesced sum ends up being zero. */
+  @Test
+  public void incrementCoalescingWithZeroSumAmount() throws Exception {
+    client.setFlushInterval(SLOW_FLUSH);
+    final byte[] table = TestIntegration.table.getBytes();
+    final byte[] key = "cnt".getBytes();
+    final byte[] family = TestIntegration.family.getBytes();
+    final byte[] qual = { 'q' };
+    final DeleteRequest del = new DeleteRequest(table, key, family, qual);
+    del.setBufferable(false);
+    client.delete(del).join();
+    // HBase 0.98 and up do not create a KV on atomic increment when the
+    // increment amount is 0.  So let's first send an increment of some
+    // arbitrary value, and then ensure that this value hasn't changed.
+    long n = client.atomicIncrement(new AtomicIncrementRequest(table, key,
+                                                               family, qual,
+                                                               42)).join();
+    assertEquals(42, n);
+    bufferIncrement(table, key, family, qual, 1);
+    bufferIncrement(table, key, family, qual, 2);
+    bufferIncrement(table, key, family, qual, -3);
+    client.flush().joinUninterruptibly();
+    final GetRequest get = new GetRequest(table, key)
+      .family(family).qualifier(qual);
+    final ArrayList<KeyValue> kvs = client.get(get).join();
+    assertSizeIs(1, kvs);
+    assertEquals(42, Bytes.getLong(kvs.get(0).value()));
+    // The sum was 0, but must have sent the increment anyway.
+    // So in total we should have sent two increments, the initial one,
+    // that sets the value to 42, and the one incrementing by zero.
+    assertEquals(2, client.stats().atomicIncrements());
+  }
+
+  /** Multi-column increment coalescing where the coalesced sum ends up being zero. */
+  @Test
+  public void multiColumnIncrementCoalescingWithZeroSumAmount() throws Exception {
+    client.setFlushInterval(SLOW_FLUSH);
+    final byte[] table = TestIntegration.table.getBytes();
+    final byte[] key = "cnt".getBytes();
+    final byte[] family = TestIntegration.family.getBytes();
+    final byte[][] quals = { {'p'}, {'q'} };
+
+    final Collection<Deferred<Object>> dels =  new ArrayList<Deferred<Object>>();
+    dels.add(client.delete(new DeleteRequest(table, key, family, quals[0])));
+    dels.add(client.delete(new DeleteRequest(table, key, family, quals[1])));
+    Deferred.group(dels).join();
+
+    // HBase 0.98 and up do not create a KV on atomic increment when the
+    // increment amount is 0.  So let's first send an increment of some
+    // arbitrary value, and then ensure that this value hasn't changed.
+    Map<byte[], Long> inits = client.atomicIncrements(new MultiColumnAtomicIncrementRequest(table, key,
+            family, quals, new long[] {42,42})).join();
+    for(Map.Entry<byte[], Long> entry : inits.entrySet()) {
+      assertEquals(42, entry.getValue().longValue());
+    }
+
+    bufferMultiColumnIncrement(table, key, family, quals, new long[] { 1, 1 });
+    bufferMultiColumnIncrement(table, key, family, quals, new long[] { 2, 2 });
+    bufferMultiColumnIncrement(table, key, family, quals, new long[] { -3, -3 });
+
+    client.flush().joinUninterruptibly();
+    final GetRequest get = new GetRequest(table, key)
+      .family(family).qualifiers(quals);
+    final ArrayList<KeyValue> kvs = client.get(get).join();
+    assertSizeIs(2, kvs);
+    assertEquals(42, Bytes.getLong(kvs.get(0).value()));
+    assertEquals(42, Bytes.getLong(kvs.get(1).value()));
+    // The sum was 0, but must have sent the increment anyway.
+    // So in total we should have sent two increments, the initial one,
+    // that sets the value to 42, and the one incrementing by zero.
+    assertEquals(2, client.stats().atomicIncrements());
+  }
+
   /** Helper method to create an atomic increment request.  */
+  private Deferred<Long> bufferIncrement(final byte[] table,
+                                         final byte[] key, final byte[] family,
+                                         final byte[] qual, final long value) {
+    return
+      client.bufferAtomicIncrement(new AtomicIncrementRequest(table, key,
+                                                              family, qual,
+                                                              value));
+  }
+
+  /** Helper method to create an atomic multi-column increment request.  */
   private Deferred<Map<byte[], Long>> bufferMultiColumnIncrement(final byte[] table,
                                                                  final byte[] key, final byte[] family,
                                                                  final byte[][] quals) {
     return
       client.bufferMultiColumnAtomicIncrement(new MultiColumnAtomicIncrementRequest(table, key,
           family, quals));
+  }
+
+  private Deferred<Map<byte[], Long>> bufferMultiColumnIncrement(final byte[] table,
+                                                                 final byte[] key, final byte[] family,
+                                                                 final byte[][] quals, final long[] amounts) {
+    return
+      client.bufferMultiColumnAtomicIncrement(new MultiColumnAtomicIncrementRequest(table, key,
+          family, quals, amounts));
   }
 
   /** Helper method to create a get request.  */
